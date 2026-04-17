@@ -1,7 +1,6 @@
 import formidable from 'formidable';
 import fs from 'fs';
 import path from 'path';
-import { supabaseAdmin } from '../../lib/supabase';
 
 export const config = { api: { bodyParser: false } };
 
@@ -52,13 +51,6 @@ function chunkSections(sections, size = 3000, overlap = 300) {
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).end();
-
-  // Auth check
-  const token = req.headers.authorization?.split(' ')[1];
-  if (token) {
-    const { data: { user } } = await supabaseAdmin.auth.getUser(token);
-    if (!user) return res.status(401).json({ error: 'Not authenticated' });
-  }
 
   const form = formidable({ maxFileSize: 200 * 1024 * 1024 });
   let files;
