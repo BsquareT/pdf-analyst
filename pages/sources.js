@@ -6,20 +6,9 @@ import { supabase } from '../lib/supabase';
 import Layout from '../components/Layout';
 
 // ── CLIENT-SIDE TEXT EXTRACTION ──────────────────────────────────────────────
-// PDF: uses pdf.js loaded from CDN (no file size limit — only text is sent to server)
-// PPTX: uses JSZip loaded from CDN
 
-async function loadScript(src) {
-  if (document.querySelector(`script[src="${src}"]`)) {
-    // Wait for it to be ready
-    await new Promise(resolve => {
-      const check = setInterval(() => {
-        if (window.pdfjsLib || window.JSZip) { clearInterval(check); resolve(); }
-      }, 100);
-      setTimeout(() => { clearInterval(check); resolve(); }, 5000);
-    });
-    return;
-  }
+async function loadScript(src, checkGlobal) {
+  if (window[checkGlobal]) return;
   return new Promise((resolve, reject) => {
     const s = document.createElement('script');
     s.src = src;
@@ -30,7 +19,10 @@ async function loadScript(src) {
 }
 
 async function extractPdfClientSide(file, onProgress) {
-  await loadScript('https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js');
+  await loadScript(
+    'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js',
+    'pdfjsLib'
+  );
   window.pdfjsLib.GlobalWorkerOptions.workerSrc =
     'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 
@@ -39,7 +31,7 @@ async function extractPdfClientSide(file, onProgress) {
   const sections = [];
 
   for (let i = 1; i <= pdf.numPages; i++) {
-    onProgress(`Extracting page ${i} of ${pdf.numPages}…`);
+    if (i % 10 === 0 || i === 1) onProgress(`Extracting page ${i} of ${pdf.numPages}…`);
     const page = await pdf.getPage(i);
     const tc = await page.getTextContent();
     const text = tc.items.map(item => item.str).join(' ').trim();
@@ -50,7 +42,10 @@ async function extractPdfClientSide(file, onProgress) {
 }
 
 async function extractPptxClientSide(file, onProgress) {
-  await loadScript('https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js');
+  await loadScript(
+    'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js',
+    'JSZip'
+  );
   onProgress('Reading PowerPoint slides…');
 
   const arrayBuffer = await file.arrayBuffer();
@@ -110,21 +105,21 @@ export default function Sources() {
     });
   }, []);
 
-  const token = session?.access_token;
-
   const loadSources = useCallback(async () => {
-    if (!token) return;
+    if (!session) return;
     setLoadingSources(true);
-    const res = await fetch('/api/sources/list', { headers: { Authorization: `Bearer ${token}` } });
-    const data = await res.json();
-    setSources(data.sources || []);
+    const { data } = await supabase
+      .from('sources')
+      .select('id, file_name, total_pages, chunk_count, created_at')
+      .order('created_at', { ascending: false });
+    setSources(data || []);
     setLoadingSources(false);
-  }, [token]);
+  }, [session]);
 
-  useEffect(() => { if (token) loadSources(); }, [token]);
+  useEffect(() => { if (session) loadSources(); }, [session]);
 
   const processFile = useCallback(async (f) => {
-    if (!f) return;
+    if (!f || !session) return;
     const ext = f.name.split('.').pop().toLowerCase();
     if (!['pdf', 'pptx'].includes(ext)) { setError('Only PDF and PPTX files are supported.'); return; }
 
@@ -132,7 +127,7 @@ export default function Sources() {
     setUploadProgress('Starting…');
 
     try {
-      // Extract text IN THE BROWSER — no file size limit
+      // ── Step 1: Extract text in the browser ──────────────────────────
       let extracted;
       if (ext === 'pdf') {
         extracted = await extractPdfClientSide(f, setUploadProgress);
@@ -140,23 +135,28 @@ export default function Sources() {
         extracted = await extractPptxClientSide(f, setUploadProgress);
       }
 
-      setUploadProgress('Chunking content…');
+      setUploadProgress(`Chunking ${extracted.totalPages} pages…`);
       const chunks = chunkSections(extracted.sections);
 
+      // ── Step 2: Save DIRECTLY to Supabase (bypasses Vercel 4.5MB limit) ──
       setUploadProgress(`Saving ${chunks.length} chunks to your library…`);
 
-      // Only send text chunks (tiny) — not the file
-      const saveRes = await fetch('/api/sources/save', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({
-          fileName: f.name,
-          chunks,
-          totalPages: extracted.totalPages,
-        }),
+      // Remove existing source with same name
+      await supabase
+        .from('sources')
+        .delete()
+        .eq('user_id', session.user.id)
+        .eq('file_name', f.name);
+
+      const { error: saveErr } = await supabase.from('sources').insert({
+        user_id: session.user.id,
+        file_name: f.name,
+        total_pages: extracted.totalPages,
+        chunk_count: chunks.length,
+        chunks: chunks, // stored as JSONB in Supabase — no size limit
       });
-      const saveData = await saveRes.json();
-      if (saveData.error) throw new Error(saveData.error);
+
+      if (saveErr) throw new Error(saveErr.message);
 
       await loadSources();
     } catch (err) {
@@ -165,16 +165,12 @@ export default function Sources() {
       setUploading(false);
       setUploadProgress('');
     }
-  }, [token, loadSources]);
+  }, [session, loadSources]);
 
   const deleteSource = async (id) => {
     if (!confirm('Remove this source from your library?')) return;
     setDeleting(id);
-    await fetch('/api/sources/delete', {
-      method: 'DELETE',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-      body: JSON.stringify({ id }),
-    });
+    await supabase.from('sources').delete().eq('id', id);
     await loadSources();
     setDeleting(null);
   };
@@ -199,7 +195,7 @@ export default function Sources() {
               My <em style={{ color: '#c9a86c' }}>Sources</em>
             </h1>
             <p style={{ ...m, fontSize: '0.65rem', color: '#555', marginTop: 6, letterSpacing: '0.08em', textTransform: 'uppercase' }}>
-              Any size PDF or PPTX · Extracted in browser · Stored permanently
+              Any size PDF or PPTX · Extracted in browser · Saved directly to database
             </p>
           </div>
 
@@ -212,14 +208,15 @@ export default function Sources() {
             onClick={() => !uploading && fileRef.current.click()}
             style={{ opacity: uploading ? 0.8 : 1, cursor: uploading ? 'default' : 'pointer' }}
           >
-            <input ref={fileRef} type="file" accept=".pdf,.pptx" style={{ display: 'none' }} onChange={e => processFile(e.target.files[0])} />
+            <input ref={fileRef} type="file" accept=".pdf,.pptx" style={{ display: 'none' }}
+              onChange={e => processFile(e.target.files[0])} />
 
             {uploading ? (
               <>
                 <div style={{ width: 32, height: 32, border: '2px solid #2a2a2a', borderTopColor: '#c9a86c', borderRadius: '50%', margin: '0 auto 16px', animation: 'spin 0.7s linear infinite' }} />
                 <p style={{ ...serif, fontSize: '1.1rem', color: '#e2ddd6', marginBottom: 8 }}>Processing…</p>
                 <p style={{ ...m, fontSize: '0.7rem', color: '#c9a86c', marginBottom: 4 }}>{uploadProgress}</p>
-                <p style={{ ...m, fontSize: '0.62rem', color: '#555' }}>Text is extracted locally — no file size limit</p>
+                <p style={{ ...m, fontSize: '0.62rem', color: '#555' }}>Extracted in your browser · No file size limit</p>
               </>
             ) : (
               <>
@@ -229,7 +226,7 @@ export default function Sources() {
                   Drop here or <strong style={{ color: '#c9a86c' }}>tap to browse</strong>
                 </p>
                 <p style={{ ...m, fontSize: '0.65rem', color: '#444', marginTop: 8 }}>
-                  PDF or PPTX — any size — extracted in your browser
+                  PDF or PPTX · Any size · 1000 page textbooks work fine
                 </p>
               </>
             )}
@@ -284,12 +281,13 @@ export default function Sources() {
             <div style={{ marginTop: 28, background: '#17150e', border: '1px solid #3a3020', borderRadius: 10, padding: '16px 20px' }}>
               <p style={{ ...m, fontSize: '0.72rem', color: '#c9a86c', marginBottom: 4 }}>✓ Sources ready</p>
               <p style={{ ...m, fontSize: '0.68rem', color: '#666' }}>
-                Go to <Link href="/" style={{ color: '#c9a86c', textDecoration: 'none' }}>Dashboard</Link> to select and analyze.
+                Go to <Link href="/" style={{ color: '#c9a86c', textDecoration: 'none' }}>Dashboard</Link> to select and analyze them.
               </p>
             </div>
           )}
         </div>
       </Layout>
+
       <style>{`
         @keyframes spin { to { transform: rotate(360deg); } }
         .drop-zone { border: 1.5px dashed #2a2a2a; border-radius:12px; background:#141414; padding:48px 20px; text-align:center; transition:all 0.2s; margin-bottom:18px; }
