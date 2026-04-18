@@ -60,7 +60,14 @@ export default function Home() {
   const [file, setFile] = useState(null);
   const [chunks, setChunks] = useState([]);
   const [totalPages, setTotalPages] = useState(0);
-  const [structure, setStructure] = useState(DEFAULT_STRUCTURE);
+  const [structure, setStructure] = useState(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('pdf_analyst_structure') || DEFAULT_STRUCTURE;
+    }
+    return DEFAULT_STRUCTURE;
+  });
+  const [structureOpen, setStructureOpen] = useState(false);
+  const [structureSaved, setStructureSaved] = useState(false);
   const [question, setQuestion] = useState('');
   const [result, setResult] = useState(null);
   const [fromCache, setFromCache] = useState(false);
@@ -160,6 +167,17 @@ export default function Home() {
 
   const reset = () => { setFile(null); setChunks([]); setResult(null); setError(null); setStatus('idle'); setQuestion(''); };
 
+  const saveStructure = () => {
+    localStorage.setItem('pdf_analyst_structure', structure);
+    setStructureSaved(true);
+    setTimeout(() => setStructureSaved(false), 2000);
+  };
+
+  const resetStructure = () => {
+    setStructure(DEFAULT_STRUCTURE);
+    localStorage.setItem('pdf_analyst_structure', DEFAULT_STRUCTURE);
+  };
+
   if (authLoading) return (
     <div style={{ minHeight:'100vh', background:'#0c0c0c', display:'flex', alignItems:'center', justifyContent:'center' }}>
       <p style={{ fontFamily:"'IBM Plex Mono',monospace", fontSize:'0.75rem', color:'#555' }}>Loading…</p>
@@ -194,7 +212,69 @@ export default function Home() {
             </p>
           </div>
 
-          {/* IDLE: Upload */}
+          {/* Structure Settings Panel - always accessible */}
+          <div style={{ marginBottom: 18 }}>
+            <button
+              onClick={() => setStructureOpen(o => !o)}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 8,
+                background: structureOpen ? '#17150e' : '#141414',
+                border: `1px solid ${structureOpen ? '#3a3020' : '#222'}`,
+                borderRadius: 8, padding: '10px 16px', cursor: 'pointer',
+                fontFamily: "'IBM Plex Mono',monospace", fontSize: '0.72rem',
+                color: structureOpen ? '#c9a86c' : '#666',
+                letterSpacing: '0.06em', width: '100%', textAlign: 'left',
+                transition: 'all 0.15s',
+              }}
+            >
+              <span>⚙</span>
+              <span>Output Structure</span>
+              <span style={{ marginLeft: 'auto', fontSize: '0.65rem' }}>
+                {structureOpen ? '▲ hide' : '▼ edit'}
+              </span>
+            </button>
+
+            {structureOpen && (
+              <div style={{ ...s.card, marginTop: 8, marginBottom: 0 }}>
+                <p style={s.hint}>
+                  This structure is saved to your browser. Set it once and it persists across sessions.
+                  Use ## headings, bullet points, or plain instructions.
+                </p>
+                <textarea
+                  style={{ ...s.textarea, minHeight: 200 }}
+                  value={structure}
+                  onChange={e => setStructure(e.target.value)}
+                  rows={10}
+                />
+                <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+                  <button
+                    onClick={saveStructure}
+                    style={{
+                      flex: 1, padding: '10px', background: '#c9a86c', color: '#0c0c0c',
+                      border: 'none', borderRadius: 7, cursor: 'pointer',
+                      fontFamily: "'IBM Plex Mono',monospace", fontSize: '0.72rem',
+                      fontWeight: 500, letterSpacing: '0.05em',
+                    }}
+                  >
+                    {structureSaved ? '✓ Saved!' : 'Save Structure'}
+                  </button>
+                  <button
+                    onClick={resetStructure}
+                    style={{
+                      padding: '10px 16px', background: 'transparent',
+                      border: '1px solid #333', borderRadius: 7, cursor: 'pointer',
+                      fontFamily: "'IBM Plex Mono',monospace", fontSize: '0.72rem',
+                      color: '#555',
+                    }}
+                  >
+                    Reset to Default
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+
+
           {status === 'idle' && (
             <>
               <div style={s.label}>01 — Upload Document</div>
@@ -249,16 +329,9 @@ export default function Home() {
                 ))}
               </div>
 
-              {/* Structure */}
-              <div style={s.card}>
-                <div style={s.label}>02 — Output Structure</div>
-                <p style={s.hint}>Define exactly how you want Claude to respond. Use ## headings, bullet points, or plain instructions.</p>
-                <textarea style={s.textarea} value={structure} onChange={e => setStructure(e.target.value)} rows={10} />
-              </div>
-
               {/* Question */}
               <div style={s.card}>
-                <div style={s.label}>03 — Question <span style={{ color:'#444', fontWeight:400 }}>(optional)</span></div>
+                <div style={s.label}>02 — Question <span style={{ color:'#444', fontWeight:400 }}>(optional)</span></div>
                 <p style={s.hint}>Ask something specific to focus on relevant pages, or leave blank for a full analysis.</p>
                 <input style={s.input} type="text" value={question} onChange={e => setQuestion(e.target.value)} onKeyDown={e => e.key==='Enter' && !isAnalyzing && analyze()} placeholder="e.g.  What is Newton's third law?" />
                 <p style={{ ...s.hint, marginTop:8, marginBottom:0 }}>
