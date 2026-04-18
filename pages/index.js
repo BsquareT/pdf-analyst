@@ -214,10 +214,11 @@ export default function Home() {
 
     try {
       // Fetch chunks for selected sources
+      const sourceNames = savedSources.filter(s => selectedSourceIds.includes(s.id)).map(s => s.file_name);
       const chunksRes = await fetch('/api/sources/get-chunks', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ ids: selectedSourceIds }),
+        body: JSON.stringify({ chunks: relevant, question, structure, fileName: sourceNames.join(', '), sourceNames }),
       });
       const chunksData = await chunksRes.json();
       if (chunksData.error) throw new Error(chunksData.error);

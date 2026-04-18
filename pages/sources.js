@@ -5,24 +5,23 @@ import Link from 'next/link';
 import { supabase } from '../lib/supabase';
 import Layout from '../components/Layout';
 
-// ── CLIENT-SIDE TEXT EXTRACTION ──────────────────────────────────────────────
+const CHUNKS_PER_BATCH = 50; // Each insert is max 50 chunks — avoids statement timeout
+
+// ── CLIENT-SIDE EXTRACTION ────────────────────────────────────────────────────
 
 async function loadScript(src, checkGlobal) {
   if (window[checkGlobal]) return;
   return new Promise((resolve, reject) => {
+    const existing = document.querySelector(`script[src="${src}"]`);
+    if (existing) { setTimeout(resolve, 500); return; }
     const s = document.createElement('script');
-    s.src = src;
-    s.onload = resolve;
-    s.onerror = reject;
+    s.src = src; s.onload = resolve; s.onerror = reject;
     document.head.appendChild(s);
   });
 }
 
 async function extractPdfClientSide(file, onProgress) {
-  await loadScript(
-    'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js',
-    'pdfjsLib'
-  );
+  await loadScript('https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js', 'pdfjsLib');
   window.pdfjsLib.GlobalWorkerOptions.workerSrc =
     'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 
@@ -31,23 +30,20 @@ async function extractPdfClientSide(file, onProgress) {
   const sections = [];
 
   for (let i = 1; i <= pdf.numPages; i++) {
-    if (i % 10 === 0 || i === 1) onProgress(`Extracting page ${i} of ${pdf.numPages}…`);
+    if (i === 1 || i % 20 === 0 || i === pdf.numPages) {
+      onProgress(`Reading page ${i} of ${pdf.numPages}…`);
+    }
     const page = await pdf.getPage(i);
     const tc = await page.getTextContent();
     const text = tc.items.map(item => item.str).join(' ').trim();
     if (text) sections.push({ source: `Page ${i}`, text });
   }
-
   return { sections, totalPages: pdf.numPages };
 }
 
 async function extractPptxClientSide(file, onProgress) {
-  await loadScript(
-    'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js',
-    'JSZip'
-  );
+  await loadScript('https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js', 'JSZip');
   onProgress('Reading PowerPoint slides…');
-
   const arrayBuffer = await file.arrayBuffer();
   const zip = await window.JSZip.loadAsync(arrayBuffer);
   const slideFiles = Object.keys(zip.files)
@@ -80,6 +76,8 @@ function chunkSections(sections, size = 3000, overlap = 300) {
   return chunks;
 }
 
+// ── MAIN COMPONENT ────────────────────────────────────────────────────────────
+
 export default function Sources() {
   const router = useRouter();
   const [session, setSession] = useState(null);
@@ -89,6 +87,7 @@ export default function Sources() {
   const [loadingSources, setLoadingSources] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState('');
+  const [uploadPercent, setUploadPercent] = useState(0);
   const [dragOver, setDragOver] = useState(false);
   const [error, setError] = useState(null);
   const [deleting, setDeleting] = useState(null);
@@ -105,12 +104,15 @@ export default function Sources() {
     });
   }, []);
 
+  // Load sources — deduplicated by file (only show part_index=0)
   const loadSources = useCallback(async () => {
     if (!session) return;
     setLoadingSources(true);
     const { data } = await supabase
       .from('sources')
-      .select('id, file_name, total_pages, chunk_count, created_at')
+      .select('id, file_name, total_pages, chunk_count, created_at, source_group_id, part_index, total_parts')
+      .eq('user_id', session.user.id)
+      .eq('part_index', 0)
       .order('created_at', { ascending: false });
     setSources(data || []);
     setLoadingSources(false);
@@ -123,11 +125,11 @@ export default function Sources() {
     const ext = f.name.split('.').pop().toLowerCase();
     if (!['pdf', 'pptx'].includes(ext)) { setError('Only PDF and PPTX files are supported.'); return; }
 
-    setUploading(true); setError(null);
+    setUploading(true); setError(null); setUploadPercent(0);
     setUploadProgress('Starting…');
 
     try {
-      // ── Step 1: Extract text in the browser ──────────────────────────
+      // ── Step 1: Extract text in browser ──────────────────────────────
       let extracted;
       if (ext === 'pdf') {
         extracted = await extractPdfClientSide(f, setUploadProgress);
@@ -137,40 +139,79 @@ export default function Sources() {
 
       setUploadProgress(`Chunking ${extracted.totalPages} pages…`);
       const chunks = chunkSections(extracted.sections);
+      const totalBatches = Math.ceil(chunks.length / CHUNKS_PER_BATCH);
 
-      // ── Step 2: Save DIRECTLY to Supabase (bypasses Vercel 4.5MB limit) ──
-      setUploadProgress(`Saving ${chunks.length} chunks to your library…`);
-
-      // Remove existing source with same name
-      await supabase
+      // ── Step 2: Delete existing source with same name ─────────────────
+      setUploadProgress('Replacing existing version if any…');
+      const { data: existing } = await supabase
         .from('sources')
-        .delete()
+        .select('source_group_id')
         .eq('user_id', session.user.id)
-        .eq('file_name', f.name);
+        .eq('file_name', f.name)
+        .eq('part_index', 0)
+        .maybeSingle();
 
-      const { error: saveErr } = await supabase.from('sources').insert({
-        user_id: session.user.id,
-        file_name: f.name,
-        total_pages: extracted.totalPages,
-        chunk_count: chunks.length,
-        chunks: chunks, // stored as JSONB in Supabase — no size limit
-      });
+      if (existing?.source_group_id) {
+        await supabase.from('sources')
+          .delete()
+          .eq('user_id', session.user.id)
+          .eq('source_group_id', existing.source_group_id);
+      } else {
+        await supabase.from('sources')
+          .delete()
+          .eq('user_id', session.user.id)
+          .eq('file_name', f.name);
+      }
 
-      if (saveErr) throw new Error(saveErr.message);
+      // ── Step 3: Generate a group ID to link all batches together ──────
+      const groupId = crypto.randomUUID();
 
+      // ── Step 4: Save in batches of 50 — avoids statement timeout ──────
+      for (let i = 0; i < totalBatches; i++) {
+        const batchChunks = chunks.slice(i * CHUNKS_PER_BATCH, (i + 1) * CHUNKS_PER_BATCH);
+        const percent = Math.round(((i + 1) / totalBatches) * 100);
+        setUploadPercent(percent);
+        setUploadProgress(`Saving batch ${i + 1} of ${totalBatches} (${percent}%)…`);
+
+        const { error: saveErr } = await supabase.from('sources').insert({
+          user_id: session.user.id,
+          file_name: f.name,
+          total_pages: extracted.totalPages,
+          chunk_count: chunks.length,   // total chunk count always stored
+          chunks: batchChunks,          // only this batch's chunks
+          part_index: i,
+          total_parts: totalBatches,
+          source_group_id: groupId,
+        });
+
+        if (saveErr) throw new Error(`Batch ${i + 1} failed: ${saveErr.message}`);
+      }
+
+      setUploadProgress('Done!');
+      setUploadPercent(100);
       await loadSources();
     } catch (err) {
       setError(err.message || 'Upload failed. Please try again.');
     } finally {
       setUploading(false);
       setUploadProgress('');
+      setUploadPercent(0);
     }
   }, [session, loadSources]);
 
-  const deleteSource = async (id) => {
+  // Delete all parts of a source
+  const deleteSource = async (src) => {
     if (!confirm('Remove this source from your library?')) return;
-    setDeleting(id);
-    await supabase.from('sources').delete().eq('id', id);
+    setDeleting(src.id);
+    if (src.source_group_id) {
+      await supabase.from('sources').delete()
+        .eq('user_id', session.user.id)
+        .eq('source_group_id', src.source_group_id);
+    } else {
+      await supabase.from('sources').delete()
+        .eq('user_id', session.user.id)
+        .eq('file_name', src.file_name);
+    }
     await loadSources();
     setDeleting(null);
   };
@@ -195,7 +236,7 @@ export default function Sources() {
               My <em style={{ color: '#c9a86c' }}>Sources</em>
             </h1>
             <p style={{ ...m, fontSize: '0.65rem', color: '#555', marginTop: 6, letterSpacing: '0.08em', textTransform: 'uppercase' }}>
-              Any size PDF or PPTX · Extracted in browser · Saved directly to database
+              Any size · Extracted in browser · Saved in batches · No timeouts
             </p>
           </div>
 
@@ -206,17 +247,20 @@ export default function Sources() {
             onDragOver={e => { e.preventDefault(); setDragOver(true); }}
             onDragLeave={() => setDragOver(false)}
             onClick={() => !uploading && fileRef.current.click()}
-            style={{ opacity: uploading ? 0.8 : 1, cursor: uploading ? 'default' : 'pointer' }}
+            style={{ opacity: uploading ? 0.85 : 1, cursor: uploading ? 'default' : 'pointer' }}
           >
             <input ref={fileRef} type="file" accept=".pdf,.pptx" style={{ display: 'none' }}
               onChange={e => processFile(e.target.files[0])} />
 
             {uploading ? (
               <>
-                <div style={{ width: 32, height: 32, border: '2px solid #2a2a2a', borderTopColor: '#c9a86c', borderRadius: '50%', margin: '0 auto 16px', animation: 'spin 0.7s linear infinite' }} />
+                {/* Progress bar */}
+                <div style={{ width: '80%', maxWidth: 300, background: '#1e1e1e', borderRadius: 4, height: 4, margin: '0 auto 20px', overflow: 'hidden' }}>
+                  <div style={{ width: `${uploadPercent}%`, height: '100%', background: '#c9a86c', borderRadius: 4, transition: 'width 0.3s ease' }} />
+                </div>
                 <p style={{ ...serif, fontSize: '1.1rem', color: '#e2ddd6', marginBottom: 8 }}>Processing…</p>
                 <p style={{ ...m, fontSize: '0.7rem', color: '#c9a86c', marginBottom: 4 }}>{uploadProgress}</p>
-                <p style={{ ...m, fontSize: '0.62rem', color: '#555' }}>Extracted in your browser · No file size limit</p>
+                <p style={{ ...m, fontSize: '0.62rem', color: '#555' }}>Large files saved in small batches — no timeouts</p>
               </>
             ) : (
               <>
@@ -226,7 +270,7 @@ export default function Sources() {
                   Drop here or <strong style={{ color: '#c9a86c' }}>tap to browse</strong>
                 </p>
                 <p style={{ ...m, fontSize: '0.65rem', color: '#444', marginTop: 8 }}>
-                  PDF or PPTX · Any size · 1000 page textbooks work fine
+                  PDF or PPTX · Any size · 1000 page textbooks supported
                 </p>
               </>
             )}
@@ -254,17 +298,21 @@ export default function Sources() {
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
               {sources.map(src => (
                 <div key={src.id} style={{ background: '#141414', border: '1px solid #222', borderRadius: 10, padding: '14px 18px', display: 'flex', alignItems: 'center', gap: 14 }}>
-                  <span style={{ fontSize: '1.3rem', flexShrink: 0 }}>{src.file_name.endsWith('.pptx') ? '📊' : '📄'}</span>
+                  <span style={{ fontSize: '1.3rem', flexShrink: 0 }}>
+                    {src.file_name.endsWith('.pptx') ? '📊' : '📄'}
+                  </span>
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <p style={{ ...m, fontSize: '0.82rem', color: '#e2ddd6', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginBottom: 3 }}>
                       {src.file_name}
                     </p>
                     <p style={{ ...m, fontSize: '0.62rem', color: '#555' }}>
-                      {src.total_pages} pages · {src.chunk_count} chunks · {new Date(src.created_at).toLocaleDateString()}
+                      {src.total_pages} pages · {src.chunk_count} chunks
+                      {src.total_parts > 1 ? ` · ${src.total_parts} batches` : ''}
+                      {' · '}{new Date(src.created_at).toLocaleDateString()}
                     </p>
                   </div>
                   <button
-                    onClick={() => deleteSource(src.id)}
+                    onClick={() => deleteSource(src)}
                     disabled={deleting === src.id}
                     style={{ background: 'none', border: '1px solid #2a2a2a', borderRadius: 6, color: '#555', cursor: 'pointer', padding: '6px 12px', ...m, fontSize: '0.68rem' }}
                     onMouseOver={e => e.target.style.borderColor = '#d95f5f'}
@@ -281,7 +329,7 @@ export default function Sources() {
             <div style={{ marginTop: 28, background: '#17150e', border: '1px solid #3a3020', borderRadius: 10, padding: '16px 20px' }}>
               <p style={{ ...m, fontSize: '0.72rem', color: '#c9a86c', marginBottom: 4 }}>✓ Sources ready</p>
               <p style={{ ...m, fontSize: '0.68rem', color: '#666' }}>
-                Go to <Link href="/" style={{ color: '#c9a86c', textDecoration: 'none' }}>Dashboard</Link> to select and analyze them.
+                Go to <Link href="/" style={{ color: '#c9a86c', textDecoration: 'none' }}>Dashboard</Link> to select and analyze.
               </p>
             </div>
           )}
