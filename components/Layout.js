@@ -4,10 +4,53 @@ import Link from 'next/link';
 import { supabase } from '../lib/supabase';
 
 const NAV = [
-  { href: '/',        label: 'Dashboard',    icon: '▦' },
-  { href: '/sources', label: 'Sources',      icon: '📚' },
+  { href: '/',             label: 'Dashboard',    icon: '▦' },
+  { href: '/sources',      label: 'Sources',      icon: '📚' },
   { href: '/public-pulse', label: 'Public Pulse', icon: '◎' },
 ];
+
+function membershipLabel(profile) {
+  if (!profile) return '';
+  const type = profile.membership_type;
+  const exp = profile.membership_expires_at ? new Date(profile.membership_expires_at) : null;
+  const expired = exp && exp < new Date();
+  const today = new Date().toISOString().split('T')[0];
+  const isNewDay = profile.daily_reset_date !== today;
+  const dailyUsed = isNewDay ? 0 : (profile.daily_questions_used || 0);
+  const dailyLimit = profile.daily_limit || 0;
+
+  if (type === 'lifetime') return '★ Lifetime · Unlimited';
+
+  if (type === 'promax_monthly' || type === 'promax_annual') {
+    if (expired) return '⚠ Pro Max expired';
+    const label = type === 'promax_monthly' ? 'Pro Max Monthly' : 'Pro Max Annual';
+    return `${label} · Unlimited · expires ${exp?.toLocaleDateString()}`;
+  }
+
+  if (type === 'annual') {
+    if (expired) return '⚠ Annual plan expired';
+    return `Annual · ${dailyUsed}/${dailyLimit} today · expires ${exp?.toLocaleDateString()}`;
+  }
+
+  if (type === 'monthly') {
+    if (expired) return '⚠ Monthly plan expired';
+    return `Monthly · ${dailyUsed}/${dailyLimit} today · expires ${exp?.toLocaleDateString()}`;
+  }
+
+  if (type === 'pack') {
+    return `Pack · ${profile.questions_remaining ?? 0} questions left`;
+  }
+
+  // Free
+  return `Free · ${profile.questions_remaining ?? 0} questions left`;
+}
+
+function planColor(type) {
+  if (type === 'lifetime' || type === 'promax_monthly' || type === 'promax_annual') return '#c9a86c';
+  if (type === 'annual') return '#7ecfb3';
+  if (type === 'monthly') return '#a0b4e8';
+  return '#666';
+}
 
 export default function Layout({ children, user, profile }) {
   const [open, setOpen] = useState(false);
@@ -22,16 +65,6 @@ export default function Layout({ children, user, profile }) {
 
   const initials = (profile?.name || profile?.email || '?')
     .split(' ').map(w => w[0]).join('').toUpperCase().slice(0, 2);
-
-  const membershipLabel = () => {
-    if (!profile) return '';
-    if (profile.membership_type === 'lifetime') return '★ Lifetime member';
-    if (profile.membership_type === 'timed') {
-      const exp = new Date(profile.membership_expires_at);
-      return exp > new Date() ? `Unlimited · expires ${exp.toLocaleDateString()}` : 'Plan expired';
-    }
-    return `${profile.questions_remaining ?? 0} questions left`;
-  };
 
   return (
     <div style={{ minHeight: '100vh', background: '#0c0c0c' }}>
@@ -64,16 +97,16 @@ export default function Layout({ children, user, profile }) {
 
       {/* Overlay */}
       {open && (
-        <div
-          onClick={() => setOpen(false)}
-          style={{ position: 'fixed', inset: 0, zIndex: 150, background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(2px)' }}
-        />
+        <div onClick={() => setOpen(false)} style={{
+          position: 'fixed', inset: 0, zIndex: 150,
+          background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(2px)',
+        }} />
       )}
 
       {/* Sidebar */}
       <nav style={{
         position: 'fixed', top: 0, left: 0, bottom: 0, zIndex: 160,
-        width: 260, background: '#111', borderRight: '1px solid #1e1e1e',
+        width: 268, background: '#111', borderRight: '1px solid #1e1e1e',
         display: 'flex', flexDirection: 'column',
         transform: open ? 'translateX(0)' : 'translateX(-100%)',
         transition: 'transform 0.25s ease',
@@ -114,7 +147,8 @@ export default function Layout({ children, user, profile }) {
                 width: 38, height: 38, borderRadius: '50%',
                 background: '#1e1a14', border: '1px solid #3a3020',
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
-                fontFamily: "'IBM Plex Mono',monospace", fontSize: '0.75rem', color: '#c9a86c', flexShrink: 0,
+                fontFamily: "'IBM Plex Mono',monospace", fontSize: '0.75rem',
+                color: '#c9a86c', flexShrink: 0,
               }}>
                 {initials}
               </div>
@@ -128,9 +162,15 @@ export default function Layout({ children, user, profile }) {
               </div>
             </div>
 
-            <div style={{ background: '#17150e', border: '1px solid #2e2a1e', borderRadius: 6, padding: '8px 12px', marginBottom: 12 }}>
-              <p style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: '0.65rem', color: '#c9a86c' }}>
-                {membershipLabel()}
+            <div style={{
+              background: '#0f0f0f', border: '1px solid #1e1e1e',
+              borderRadius: 8, padding: '10px 12px', marginBottom: 12,
+            }}>
+              <p style={{
+                fontFamily: "'IBM Plex Mono',monospace", fontSize: '0.62rem',
+                color: planColor(profile.membership_type), lineHeight: 1.5,
+              }}>
+                {membershipLabel(profile)}
               </p>
             </div>
 
@@ -139,8 +179,8 @@ export default function Layout({ children, user, profile }) {
               style={{
                 width: '100%', padding: '9px', background: 'transparent',
                 border: '1px solid #2a2a2a', borderRadius: 7, cursor: 'pointer',
-                fontFamily: "'IBM Plex Mono',monospace", fontSize: '0.72rem', color: '#666',
-                transition: 'all 0.15s', letterSpacing: '0.04em',
+                fontFamily: "'IBM Plex Mono',monospace", fontSize: '0.72rem',
+                color: '#666', transition: 'all 0.15s', letterSpacing: '0.04em',
               }}
               onMouseOver={e => { e.currentTarget.style.borderColor = '#d95f5f'; e.currentTarget.style.color = '#d95f5f'; }}
               onMouseOut={e => { e.currentTarget.style.borderColor = '#2a2a2a'; e.currentTarget.style.color = '#666'; }}
