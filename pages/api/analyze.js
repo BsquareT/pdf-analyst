@@ -12,7 +12,7 @@ const PROVIDER = process.env.AI_PROVIDER || 'gemini';
 // Gemini model cascade: try each in order if previous is overloaded
 const GEMINI_MODELS = [
   'gemini-2.5-flash',
-  'gemini-2.5-flash-lite-preview-06-17',
+  'gemini-2.5-flash-8b',
   'gemini-2.0-flash-lite',
 ];
 
