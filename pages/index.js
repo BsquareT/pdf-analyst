@@ -130,6 +130,7 @@ export default function Home() {
   const [question, setQuestion] = useState('');
   const [result, setResult] = useState(null);
   const [fromCache, setFromCache] = useState(false);
+  const [resultImages, setResultImages] = useState([]);
   const [status, setStatus] = useState('idle');
   const [error, setError] = useState(null);
   const [tab, setTab] = useState('rendered');
@@ -219,7 +220,7 @@ export default function Home() {
 
   const analyze = async () => {
     if (!selectedSourceIds.length) return;
-    setStatus('analyzing'); setError(null); setResult(null); setFromCache(false);
+    setStatus('analyzing'); setError(null); setResult(null); setFromCache(false); setResultImages([]);
     try {
       const sourceNames = savedSources
         .filter(s => selectedSourceIds.includes(s.id))
@@ -233,7 +234,26 @@ export default function Home() {
       const chunksData = await chunksRes.json();
       if (chunksData.error) throw new Error(chunksData.error);
 
+      const imagesByPage = chunksData.imagesByPage || {};
+
       const relevant = findRelevantChunks(chunksData.chunks, question);
+
+      // Find images from relevant pages
+      const relevantImages = [];
+      const seenUrls = new Set();
+      for (const chunk of relevant) {
+        const pageNum = parseInt((chunk.source || '').match(/\d+/)?.[0]) || null;
+        if (!pageNum || !chunk.sourceGroupId) continue;
+        const key = `${chunk.sourceGroupId}_${pageNum}`;
+        const imgs = imagesByPage[key] || [];
+        for (const img of imgs) {
+          if (!seenUrls.has(img.url)) {
+            seenUrls.add(img.url);
+            relevantImages.push(img);
+          }
+        }
+      }
+      setResultImages(relevantImages.slice(0, 12)); // max 12 images shown
 
       const res = await fetch('/api/analyze', {
         method: 'POST',
@@ -442,6 +462,43 @@ export default function Home() {
                   <pre style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: '0.72rem', color: '#777', whiteSpace: 'pre-wrap', lineHeight: 1.7 }}>{result}</pre>
                 )}
               </div>
+              {resultImages.length > 0 && (
+                <div style={{ marginTop: 20 }}>
+                  <div style={{ fontFamily:"'IBM Plex Mono',monospace", fontSize:'0.62rem', letterSpacing:'0.12em', textTransform:'uppercase', color:'#c9a86c', marginBottom:12 }}>
+                    Relevant Images from Sources
+                  </div>
+                  <div style={{ display:'flex', gap:10, flexWrap:'wrap' }}>
+                    {resultImages.map((img, idx) => (
+                      <div key={idx} style={{ position:'relative', cursor:'pointer' }} onClick={() => window.open(img.url, '_blank')}>
+                        <img
+                          src={img.url}
+                          alt={`Page ${img.pageNumber}`}
+                          style={{
+                            height: 140,
+                            width: 'auto',
+                            maxWidth: 200,
+                            borderRadius: 8,
+                            border: '1px solid #2a2a2a',
+                            objectFit: 'cover',
+                            transition: 'border-color 0.15s',
+                          }}
+                          onMouseOver={e => e.target.style.borderColor = '#c9a86c'}
+                          onMouseOut={e => e.target.style.borderColor = '#2a2a2a'}
+                        />
+                        <div style={{
+                          position:'absolute', bottom:6, left:6,
+                          background:'rgba(0,0,0,0.75)',
+                          fontFamily:"'IBM Plex Mono',monospace",
+                          fontSize:'0.58rem', color:'#ccc',
+                          padding:'2px 6px', borderRadius:4,
+                        }}>
+                          {img.fileName?.split('/').pop()?.slice(0,20)} · p{img.pageNumber}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </div>
