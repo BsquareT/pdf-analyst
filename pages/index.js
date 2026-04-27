@@ -242,7 +242,9 @@ export default function Home() {
       const relevantImages = [];
       const seenUrls = new Set();
       for (const chunk of relevant) {
-        const pageNum = parseInt((chunk.source || '').match(/\d+/)?.[0]) || null;
+        // Match "Page 5" or "Slide 3" specifically — not any number in the filename
+        const pageMatch = (chunk.source || '').match(/(?:Page|Slide)\s+(\d+)/i);
+        const pageNum = pageMatch ? parseInt(pageMatch[1]) : null;
         if (!pageNum || !chunk.sourceGroupId) continue;
         const key = `${chunk.sourceGroupId}_${pageNum}`;
         const imgs = imagesByPage[key] || [];
